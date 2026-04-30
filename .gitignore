@@ -1,0 +1,13 @@
+# Secrets / local sessions
+*.json
+.env
+.env.*
+browser-sessions/
+threads.json
+*.cookie
+*.cookies
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
