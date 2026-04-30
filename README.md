@@ -10,7 +10,7 @@ Reusable agent skills for Threads automation: contextual engagement, reply-back,
 ## Install
 
 ```bash
-npx skills add shinmosy/threads-automation-skills --all
+npx skills add reydenim/threads-automation-skills --all
 ```
 
 Or install manually by copying the skill folders into your agent skills directory.
