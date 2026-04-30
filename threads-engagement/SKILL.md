@@ -237,13 +237,28 @@ Use this when the user says to post drafted content to their own Threads profile
 **Like:**
 ```
 browser_click → Like button ref
-browser_snapshot → verify button changed to "Unlike N" (not still "Like")
+browser_wait → wait 2000-3000ms (important: Threads React UI needs time to update)
+browser_snapshot → re-snapshot to get fresh button state
 ```
+
+After snapshot, check multiple verification signals in order of reliability:
+
+1. **Button text**: `Like` changed to `Unlike` or `Liked` or similar non-Like variant
+2. **Aria-pressed**: `aria-pressed="true"` on the button
+3. **Aria-label**: button label contains `Unlike` or `Unlike`
+4. **SVG fill/aria-hidden**: heart icon fill changed to filled (if visible in snapshot)
+5. **Class/style**: button classes changed (may indicate Unlike state)
+
+If signal 1 or 2 is found → **VERIFIED**
+If only signals 3–5 are found → **VERIFIED** (secondary confirmation is still valid)
+If no clear signal → retry snapshot once more after 2 seconds, then report `UNVERIFIED`
+
+Rule: for likes, be slightly more lenient than replies. A missing count number is not grounds for failing — focus on the button state change. If the button changed away from "Like", count it as verified.
 
 **Reply:**
 ```
 browser_click → Reply button ref
-browser_snapshot → verify reply compose field appeared
+browser_snapshot → verify reply compose field appeared (re-snapshot after click — ref changes)
 browser_type → ref of text field, contextual reply text
 browser_click → Post button ref
 browser_snapshot → verify reply count incremented or dialog closed
@@ -306,10 +321,32 @@ Use this when the task is to create original Threads content with a generated im
 
 ## Verification Signals
 
+### Like Verification (more lenient — lower-stakes action)
+
+A like is verified if ANY of these signals are present after clicking:
+
+| Signal | Reliability |
+|--------|-------------|
+| Button text changed from `Like` to `Unlike`/`Liked`/etc. | ✅ High |
+| `aria-pressed="true"` on the button | ✅ High |
+| `aria-label` contains `Unlike` | 🟡 Medium |
+| Button classes changed (React rerendered) | 🟡 Medium |
+| Heart icon fill/state changed | 🟡 Medium |
+
+If no signal after first snapshot → wait 2s → snapshot again
+If still no signal after retry → report `UNVERIFIED` (not `FAILED`)
+Never block on exact count number for likes — count can lag behind.
+
+### Reply Verification (strict — see Anti-Duplicate and Verification sections)
+
+Same rules as the main verification section: navigate to `/replies` tab, find reply text, screenshot.
+
+### Login Verification
+
 | Action | Success Signal | Failure Signal |
 |--------|---------------|----------------|
-| Like | "Like" → "Unlike N" | Button still says "Like" |
-| Reply | Reply count increments, dialog closes | Count unchanged, field still open |
+| Like | Button changed from "Like" → "Unlike"/"Liked"/aria-pressed=true | Button still "Like" after retry |
+| Reply | Reply found on `/replies` tab + screenshot saved | Reply not found on Replies tab |
 | Login | "For you" heading, compose box visible | Login form, "Log in" prompt |
 
 ## Report Format
@@ -329,10 +366,10 @@ Template:
 
 **Likes**
 ✅ @{username} — {short_context}  
-   Verified: `{verification_signal}`
+   Signal: `{which verification signal was found}`
 
 ⚠️ @{username} — {short_context}  
-   Not counted: verification failed / button still showed `Like`
+   Status: `UNVERIFIED` — button state unclear after retry
 
 **Reply**
 Target: @{username}  
