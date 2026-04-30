@@ -1,5 +1,7 @@
 # Threads Automation Skills
 
+![Threads Automation Skills banner](assets/threads-automation-banner.svg)
+
 Reusable agent skills for Threads automation: contextual engagement, reply-back, visual post publishing, verification, and anti-AI writing polish.
 
 ## Language / Bahasa
