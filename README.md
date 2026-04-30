@@ -37,6 +37,25 @@ Or install manually by copying the skill folders into your agent skills director
 - Verify posted replies via the profile Replies tab.
 - Produce clean reports with `VERIFIED`, `FAILED`, or `UNVERIFIED` status.
 
+### Optional: Account persona layer
+
+This skill now includes a persona/vibe/lore layer so the account can feel like a real internet character instead of a generic reply bot. Customize it inside `threads-engagement/SKILL.md`.
+
+Suggested fields to edit:
+
+- Core persona — who the account is.
+- Vibe keywords — casual, curious, witty, calm, builder-minded, etc.
+- Lore anchors — recurring themes and backstory.
+- Voice rules — language, emoji, humor, reply length, boundaries.
+- Content archetypes — repeatable post categories.
+
+Example direction:
+
+```text
+@YOUR_USERNAME is a casual internet-native creator/builder exploring AI tools, creator workflows, airdrops, and digital systems.
+The account sounds curious, playful, self-aware, and practical — like an internet friend with taste, not a corporate brand.
+```
+
 ### Required setup
 
 1. Replace `@YOUR_USERNAME` in your prompts/cronjobs with your Threads username.
@@ -176,6 +195,25 @@ Atau install manual dengan copy folder skill ke direktori skills agent kamu.
 - Cek duplikat sebelum reply.
 - Verifikasi reply lewat tab Replies di profile.
 - Membuat report rapi dengan status `VERIFIED`, `FAILED`, atau `UNVERIFIED`.
+
+### Opsional: account persona layer
+
+Skill ini sekarang punya layer persona/vibe/lore supaya akun terasa seperti karakter internet yang punya kepribadian sendiri, bukan bot reply generic. Kamu bisa custom di `threads-engagement/SKILL.md`.
+
+Bagian yang bisa diedit:
+
+- Core persona — akun ini siapa.
+- Vibe keywords — casual, curious, witty, calm, builder-minded, dll.
+- Lore anchors — tema berulang dan cerita kecil akun.
+- Voice rules — bahasa, emoji, humor, panjang reply, batasan.
+- Content archetypes — kategori post yang bisa diulang.
+
+Contoh arah:
+
+```text
+@YOUR_USERNAME adalah creator/builder internet-native yang casual, eksplor AI tools, creator workflow, airdrop, dan digital systems.
+Akun terasa curious, playful, self-aware, dan praktis — kayak internet friend yang punya taste, bukan brand corporate.
+```
 
 ### Setup yang dibutuhkan
 
