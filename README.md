@@ -47,6 +47,76 @@ Or install manually by copying the skill folders into your agent skills director
 
 Do **not** commit or share your cookie/session file.
 
+### Quickstart: from install to running automation
+
+Follow this flow after installing the skills.
+
+1. **Install the skills**
+
+```bash
+npx skills add reydenim/threads-automation-skills --all
+```
+
+2. **Log in to Threads in your browser**
+
+Open Threads, log in normally, and make sure your profile loads.
+
+3. **Export your Threads cookies/session**
+
+Use Cookie-Editor or a similar browser extension. Export cookies for `threads.com` / `www.threads.com` as JSON.
+
+4. **Save the session file locally**
+
+Create the browser session directory and save the exported JSON here:
+
+```bash
+mkdir -p ~/.hermes/browser-sessions
+# Save/export your cookies as:
+# ~/.hermes/browser-sessions/threads.json
+```
+
+5. **Create a cronjob / scheduled automation**
+
+In your agent scheduler, create a recurring job using the `threads-engagement` and `avoid-ai-writing` skills. Example prompt:
+
+```text
+Every 45 minutes, perform balanced Threads engagement for @YOUR_USERNAME using the saved browser session at ~/.hermes/browser-sessions/threads.json.
+
+Rules:
+- Verify login first.
+- Scan candidate posts or activity notifications.
+- Like up to 5 posts per run.
+- Reply at most once per run.
+- Match target post language.
+- Apply avoid-ai-writing pass before posting.
+- Duplicate-check before replying.
+- Verify replies via https://www.threads.com/@YOUR_USERNAME/replies before reporting success.
+- Report VERIFIED / FAILED / UNVERIFIED honestly.
+```
+
+6. **Run one manual test first**
+
+Before leaving it on schedule, run the job once manually. Confirm that it can:
+
+- open Threads,
+- detect the logged-in session,
+- skip unclear posts,
+- draft contextual replies,
+- avoid duplicates,
+- verify the result before reporting success.
+
+7. **Keep verification strict**
+
+Do not treat a reply/post as successful unless the agent verifies it on the profile or replies tab. If verification fails, the report should say `FAILED` or `UNVERIFIED`, not `VERIFIED`.
+
+### Troubleshooting
+
+- **Threads asks you to log in again** — your session expired. Export fresh cookies and replace `~/.hermes/browser-sessions/threads.json`.
+- **Agent posts generic replies** — make sure `avoid-ai-writing` is loaded and the prompt requires contextual replies.
+- **Duplicate replies happen** — add a stricter duplicate check before posting and verify the `/replies` tab.
+- **No posts are replied to** — this can be correct if the context/language is unclear. The agent should skip low-confidence targets.
+- **Image upload fails** — do not post text-only unless your workflow explicitly allows it.
+
 ### Example cron prompt
 
 ```text
@@ -116,6 +186,76 @@ Atau install manual dengan copy folder skill ke direktori skills agent kamu.
 ```
 
 Jangan pernah commit atau membagikan file cookie/session kamu.
+
+### Quickstart: dari install sampai automation jalan
+
+Ikuti alur ini setelah install skill.
+
+1. **Install skill**
+
+```bash
+npx skills add reydenim/threads-automation-skills --all
+```
+
+2. **Login Threads di browser**
+
+Buka Threads, login seperti biasa, lalu pastikan profile kamu bisa dibuka.
+
+3. **Export cookie/session Threads**
+
+Pakai Cookie-Editor atau extension sejenis. Export cookie untuk `threads.com` / `www.threads.com` dalam format JSON.
+
+4. **Simpan session file secara lokal**
+
+Buat folder browser session, lalu simpan hasil export JSON ke path ini:
+
+```bash
+mkdir -p ~/.hermes/browser-sessions
+# Simpan/export cookie kamu sebagai:
+# ~/.hermes/browser-sessions/threads.json
+```
+
+5. **Buat cronjob / automation terjadwal**
+
+Di scheduler agent kamu, buat job berulang dengan skill `threads-engagement` dan `avoid-ai-writing`. Contoh prompt:
+
+```text
+Setiap 45 menit, jalankan balanced Threads engagement untuk @YOUR_USERNAME memakai browser session yang tersimpan di ~/.hermes/browser-sessions/threads.json.
+
+Rules:
+- Verifikasi login dulu.
+- Scan candidate posts atau activity notifications.
+- Like maksimal 5 post per run.
+- Reply maksimal 1 kali per run.
+- Sesuaikan bahasa reply dengan bahasa post target.
+- Jalankan avoid-ai-writing pass sebelum posting.
+- Cek duplikat sebelum reply.
+- Verifikasi reply lewat https://www.threads.com/@YOUR_USERNAME/replies sebelum melaporkan sukses.
+- Laporkan status VERIFIED / FAILED / UNVERIFIED secara jujur.
+```
+
+6. **Jalankan manual test sekali dulu**
+
+Sebelum ditinggal jalan otomatis, run job sekali secara manual. Pastikan agent bisa:
+
+- membuka Threads,
+- mendeteksi session login,
+- skip post yang konteksnya kurang jelas,
+- membuat reply yang nyambung,
+- menghindari duplikat,
+- verifikasi hasil sebelum klaim sukses.
+
+7. **Verifikasi harus ketat**
+
+Jangan anggap reply/post berhasil kalau agent belum memverifikasi di profile atau tab replies. Kalau verifikasi gagal, report harus `FAILED` atau `UNVERIFIED`, bukan `VERIFIED`.
+
+### Troubleshooting
+
+- **Threads minta login lagi** — session expired. Export cookie baru dan replace `~/.hermes/browser-sessions/threads.json`.
+- **Reply terasa generic** — pastikan `avoid-ai-writing` diload dan prompt mewajibkan reply kontekstual.
+- **Reply duplikat** — tambahkan duplicate check lebih ketat sebelum posting dan verifikasi tab `/replies`.
+- **Tidak ada post yang direply** — ini bisa benar kalau konteks/bahasa target kurang jelas. Agent sebaiknya skip target low-confidence.
+- **Upload gambar gagal** — jangan post text-only kecuali workflow kamu memang mengizinkan.
 
 ### Contoh cron prompt
 
