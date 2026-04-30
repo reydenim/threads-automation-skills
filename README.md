@@ -39,7 +39,7 @@ Or install manually by copying the skill folders into your agent skills director
 
 ### Optional: Account persona layer
 
-This skill now includes a persona/vibe/lore layer so the account can feel like a real internet character instead of a generic reply bot. Customize it inside `threads-engagement/SKILL.md`.
+This skill now includes a persona/vibe/lore layer so the Threads account can feel like a consistent public character instead of a generic reply bot. This is for the public social account voice, not for the agent/operator persona. Customize it inside `threads-engagement/SKILL.md`.
 
 Suggested fields to edit:
 
@@ -52,8 +52,8 @@ Suggested fields to edit:
 Example direction:
 
 ```text
-@YOUR_USERNAME is a casual internet-native creator/builder exploring AI tools, creator workflows, airdrops, and digital systems.
-The account sounds curious, playful, self-aware, and practical — like an internet friend with taste, not a corporate brand.
+@YOUR_USERNAME is a quiet internet-native creator documenting the messy middle of AI tools, airdrop research, creator workflows, and calmer digital systems.
+The account sounds reflective, practical, lightly funny, and human — like a timeline friend with taste, not a corporate brand or backend operator.
 ```
 
 ### Required setup
@@ -198,7 +198,7 @@ Atau install manual dengan copy folder skill ke direktori skills agent kamu.
 
 ### Opsional: account persona layer
 
-Skill ini sekarang punya layer persona/vibe/lore supaya akun terasa seperti karakter internet yang punya kepribadian sendiri, bukan bot reply generic. Kamu bisa custom di `threads-engagement/SKILL.md`.
+Skill ini sekarang punya layer persona/vibe/lore supaya akun Threads terasa seperti karakter publik yang konsisten, bukan bot reply generic. Ini untuk voice akun sosial public, bukan persona agent/operator. Kamu bisa custom di `threads-engagement/SKILL.md`.
 
 Bagian yang bisa diedit:
 
@@ -211,8 +211,8 @@ Bagian yang bisa diedit:
 Contoh arah:
 
 ```text
-@YOUR_USERNAME adalah creator/builder internet-native yang casual, eksplor AI tools, creator workflow, airdrop, dan digital systems.
-Akun terasa curious, playful, self-aware, dan praktis — kayak internet friend yang punya taste, bukan brand corporate.
+@YOUR_USERNAME adalah creator internet-native yang dokumentasi messy middle dari AI tools, airdrop research, creator workflow, dan sistem digital yang lebih kalem.
+Akun terasa reflektif, praktis, lucu tipis, dan manusiawi — kayak teman timeline yang punya taste, bukan brand corporate atau operator backend.
 ```
 
 ### Setup yang dibutuhkan
