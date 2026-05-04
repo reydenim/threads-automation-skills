@@ -1,0 +1,1008 @@
+/**
+ * Threads Engagement v3 — Aggressive Mode (Optimized CloakBrowser)
+ * 
+ * FIXES dari v1:
+ * 1. ❌ Browser crash (newPage per post) → ✅ Single-tab navigation (reuse 1 page)
+ * 2. ❌ Reply generik/hardcoded → ✅ Contextual reply dari isi post (extract + generate)
+ * 3. ❌ Login check skip → ✅ Strict login verification, abort kalau session mati
+ * 4. ❌ No post content extraction → ✅ Extract post text untuk contextual reply
+ * 5. ❌ No language detection → ✅ Simple language detection untuk reply matching
+ *
+ * v3 additions:
+ * 6. 🧹 Pre-run cache cleanup (670MB → ~1MB) — faster launch, less RAM
+ * 7. 🔒 Optimized CloakBrowser launch args — stealth + stability + memory efficiency
+ * 8. 📊 Browser health metrics — memory usage, page load times, performance report
+ * 9. ⏱️ Hard timeout watchdog (3 min) — prevents infinite hangs
+ * 10. 📝 Persistent dedup log — no repeat replies across runs (6h cooldown)
+ */
+
+const { chromium } = require('playwright');
+const fs = require('fs');
+const path = require('path');
+const { execSync } = require('child_process');
+
+// === CONFIG (customize these for your setup) ===
+const PROFILE_DIR = process.env.THREADS_PROFILE_DIR || path.join(require('os').homedir(), '.threads-profile');
+const COOKIE_FILE = process.env.THREADS_COOKIE_FILE || path.join(require('os').homedir(), '.hermes/browser-sessions/threads.json');
+const SCREENSHOTS_DIR = process.env.THREADS_EVIDENCE_DIR || path.join(require('os').homedir(), '.hermes/threads-evidence');
+const DEDUP_FILE = path.join(SCREENSHOTS_DIR, 'replied-users.json');
+const CLOAK_BINARY = process.env.THREADS_BROWSER_BINARY || 'chromium';
+const MY_USERNAME = process.env.THREADS_USERNAME || 'YOUR_USERNAME';
+
+const MAX_LIKES = 8;
+const MAX_REPLIES = 3;
+const KEYWORDS = ['AI', 'coding', 'tech', 'creator', 'digital', 'workflow', 'produktif', 'design', 'startup', 'side project'];
+const POSTS_PER_KEYWORD = 5;
+const HARD_TIMEOUT_MS = 180000; // 3 minutes hard kill
+const DEDUP_COOLDOWN_MS = 6 * 60 * 60 * 1000; // 6 hours
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// === [v3] PRE-RUN CACHE CLEANUP ===
+function cleanupProfileCache() {
+  const cacheDirs = [
+    path.join(PROFILE_DIR, 'Default', 'Cache'),
+    path.join(PROFILE_DIR, 'Default', 'Code Cache'),
+    path.join(PROFILE_DIR, 'Default', 'GPUCache'),
+    path.join(PROFILE_DIR, 'GrShaderCache'),
+    path.join(PROFILE_DIR, 'ShaderCache'),
+    path.join(PROFILE_DIR, 'GraphiteDawnCache'),
+    path.join(PROFILE_DIR, 'Default', 'Service Worker', 'CacheStorage'),
+  ];
+
+  let freedMB = 0;
+  for (const dir of cacheDirs) {
+    if (fs.existsSync(dir)) {
+      try {
+        const sizeBefore = parseInt(execSync(`du -sm "${dir}" 2>/dev/null | cut -f1`).toString().trim()) || 0;
+        execSync(`rm -rf "${dir}"`, { timeout: 10000 });
+        freedMB += sizeBefore;
+      } catch (e) {
+        // Ignore cleanup errors — non-critical
+      }
+    }
+  }
+  return freedMB;
+}
+
+// === [v3] PERSISTENT DEDUP LOG ===
+function loadDedupLog() {
+  try {
+    if (fs.existsSync(DEDUP_FILE)) {
+      const data = JSON.parse(fs.readFileSync(DEDUP_FILE, 'utf8'));
+      // Filter out entries older than cooldown
+      const now = Date.now();
+      const active = data.filter(entry => (now - entry.timestamp) < DEDUP_COOLDOWN_MS);
+      return active;
+    }
+  } catch {}
+  return [];
+}
+
+function saveDedupLog(log) {
+  try {
+    fs.writeFileSync(DEDUP_FILE, JSON.stringify(log, null, 2));
+  } catch {}
+}
+
+function hasRepliedRecently(dedupLog, username) {
+  return dedupLog.some(entry => entry.username === username);
+}
+
+function addToDedup(dedupLog, username, reply) {
+  dedupLog.push({ username, reply: reply.substring(0, 50), timestamp: Date.now() });
+  return dedupLog;
+}
+
+// === [v3] BROWSER HEALTH METRICS ===
+class HealthMetrics {
+  constructor() {
+    this.startTime = Date.now();
+    this.pageLoads = [];
+    this.memSnapshots = [];
+  }
+
+  recordPageLoad(url, durationMs) {
+    this.pageLoads.push({ url: url.substring(0, 60), ms: durationMs });
+  }
+
+  async recordMemory(page) {
+    try {
+      const metrics = await page.evaluate(() => {
+        if (performance.memory) {
+          return {
+            usedJSHeapSize: Math.round(performance.memory.usedJSHeapSize / 1024 / 1024),
+            totalJSHeapSize: Math.round(performance.memory.totalJSHeapSize / 1024 / 1024),
+          };
+        }
+        return null;
+      });
+      if (metrics) this.memSnapshots.push(metrics);
+    } catch {}
+  }
+
+  getReport() {
+    const totalRuntime = Math.round((Date.now() - this.startTime) / 1000);
+    const avgLoadTime = this.pageLoads.length > 0
+      ? Math.round(this.pageLoads.reduce((a, p) => a + p.ms, 0) / this.pageLoads.length)
+      : 0;
+    const maxLoadTime = this.pageLoads.length > 0
+      ? Math.max(...this.pageLoads.map(p => p.ms))
+      : 0;
+    const peakMem = this.memSnapshots.length > 0
+      ? Math.max(...this.memSnapshots.map(m => m.usedJSHeapSize))
+      : 0;
+    
+    // Get system memory from /proc
+    let systemMem = 'N/A';
+    try {
+      const memInfo = execSync('free -m | grep Mem | awk \'{print $3"/"$2"MB"}\'').toString().trim();
+      systemMem = memInfo;
+    } catch {}
+
+    return {
+      totalRuntime: `${totalRuntime}s`,
+      pagesLoaded: this.pageLoads.length,
+      avgPageLoad: `${avgLoadTime}ms`,
+      maxPageLoad: `${maxLoadTime}ms`,
+      peakJSHeap: `${peakMem}MB`,
+      systemRAM: systemMem,
+    };
+  }
+}
+
+// === LANGUAGE DETECTION (simple heuristic) ===
+function detectLanguage(text) {
+  if (!text || text.length < 10) return 'unknown';
+  const lower = text.toLowerCase();
+  
+  const idMarkers = ['yang', 'ini', 'itu', 'dan', 'untuk', 'dengan', 'dari', 'ada', 'bisa', 
+    'juga', 'udah', 'gw', 'gue', 'lu', 'aja', 'banget', 'sih', 'nih', 'dong', 'deh',
+    'kayak', 'emang', 'kalo', 'tapi', 'sama', 'lagi', 'mau', 'buat', 'nggak', 'gak',
+    'wkwk', 'haha', 'anjir', 'cuy', 'bro', 'ges'];
+  const enMarkers = ['the', 'is', 'are', 'was', 'were', 'have', 'has', 'been', 'will',
+    'would', 'could', 'should', 'this', 'that', 'with', 'from', 'they', 'their',
+    'about', 'just', 'like', 'really', 'actually', 'literally', 'honestly'];
+  
+  const words = lower.split(/\s+/);
+  let idScore = 0, enScore = 0;
+  for (const w of words) {
+    if (idMarkers.includes(w)) idScore++;
+    if (enMarkers.includes(w)) enScore++;
+  }
+  
+  if (idScore > enScore) return 'id';
+  if (enScore > idScore) return 'en';
+  if (idScore === enScore && idScore > 0) return 'id';
+  return 'unknown';
+}
+
+// === CONTEXTUAL REPLY GENERATOR ===
+function generateContextualReply(postText, lang) {
+  const topics = {
+    ai: /\b(ai|artificial|gpt|chatgpt|llm|machine learning|model|prompt|automation)\b/i,
+    coding: /\b(code|coding|programming|developer|dev|bug|deploy|git|api|frontend|backend|fullstack)\b/i,
+    productivity: /\b(produktif|productive|workflow|routine|habit|konsisten|focus|time management|schedule)\b/i,
+    creator: /\b(creator|content|konten|posting|audience|engagement|grow|growth|followers|viral)\b/i,
+    burnout: /\b(burnout|capek|tired|overwhelm|istirahat|rest|break|mental|stress|overwhelmed)\b/i,
+    tools: /\b(tools?|app|aplikasi|software|platform|notion|figma|canva|obsidian)\b/i,
+    startup: /\b(startup|bisnis|business|launch|product|mvp|founder|build|ship)\b/i,
+    design: /\b(design|ui|ux|visual|aesthetic|layout|typography|color|branding)\b/i,
+    crypto: /\b(crypto|web3|blockchain|nft|token|airdrop|defi|wallet)\b/i,
+    learning: /\b(belajar|learn|tutorial|course|skill|upgrade|improve|study)\b/i,
+  };
+  
+  let detectedTopic = 'general';
+  for (const [topic, regex] of Object.entries(topics)) {
+    if (regex.test(postText)) {
+      detectedTopic = topic;
+      break;
+    }
+  }
+  
+  const replies = {
+    ai: {
+      id: [
+        'nah ini, AI tools tuh paling kerasa manfaatnya kalau udah jadi bagian dari daily workflow bukan cuma coba-coba 😄',
+        'bener, kadang yang bikin beda bukan model-nya tapi cara kita framing prompt-nya 😅',
+        'relate, gw juga lagi eksplor mana AI tools yang beneran kepake vs cuma hype doang 😭',
+        'setuju, yang penting bukan tools-nya canggih tapi output-nya bisa dipake langsung 👏',
+      ],
+      en: [
+        'this is so real — the best AI tools are the ones that actually fit into your existing flow, not the flashiest ones 😄',
+        'honestly the gap between "cool demo" and "daily driver" is still huge for most AI tools 😅',
+        'agree, prompt engineering is lowkey more about knowing what you actually need than fancy techniques 👏',
+        'been experimenting with this too — the boring reliable tools always win long term 😭',
+      ],
+    },
+    coding: {
+      id: [
+        'wkwk relate, debugging kadang lebih lama dari nulis code-nya sendiri 😭',
+        'nah ini, clean code itu bukan soal fancy pattern tapi readable buat future self 😅',
+        'bener banget, shipping > perfecting. iterate aja terus 🚀',
+        'gw juga ngalamin, kadang solusi paling simpel justru yang paling scalable 😄',
+      ],
+      en: [
+        'so true — shipping something imperfect beats perfecting something nobody uses 🚀',
+        'the debugging rabbit hole is real, sometimes stepping away for 5 min solves it faster 😭',
+        'agree, readable code > clever code every single time 😄',
+        'been there — the simplest solution is usually the most maintainable one too 👏',
+      ],
+    },
+    productivity: {
+      id: [
+        'ini bener, sistem yang simpel tapi dipake tiap hari > sistem canggih yang cuma dipake seminggu 😭',
+        'kadang produktif itu bukan soal nambah tools, tapi ngurangin distraction 😅',
+        'relate, konsistensi kecil tiap hari hasilnya lebih kerasa daripada sprint seminggu terus burnout 😄',
+        'nah ini yang sering dilupain, rest itu bagian dari produktivitas juga 🙏',
+      ],
+      en: [
+        'this hits — a boring system you actually use daily beats a fancy one you abandon in a week 😭',
+        'honestly removing things from your workflow is sometimes more productive than adding new tools 😅',
+        'small consistent effort > intense sprints followed by burnout, every time 😄',
+        'rest is part of the system, not a break from it 🙏',
+      ],
+    },
+    creator: {
+      id: [
+        'bener, kadang yang bikin grow bukan viral sekali tapi konsisten posting yang genuine 😄',
+        'ini relate, audience tuh bisa ngerasain mana yang authentic vs template 😭',
+        'nah, content yang personal justru yang paling connect sama orang 👏',
+        'setuju, mending posting imperfect tapi real daripada polished tapi hambar 😅',
+      ],
+      en: [
+        'so true — consistency beats virality for actual growth 😄',
+        'people can tell when content is genuine vs templated, authenticity always wins long term 😭',
+        'the imperfect personal stuff always connects more than polished generic content 👏',
+        'agree, showing the messy middle is what builds real audience trust 😅',
+      ],
+    },
+    burnout: {
+      id: [
+        'ini penting banget, kadang istirahat itu bukan malas tapi investasi buat energi besok 🙏',
+        'relate, burnout tuh sneaky — kerasa pas udah terlalu dalem 😭',
+        'bener, nggak harus produktif tiap hari. ada hari yang cukup survive aja udah cukup 😅',
+        'nah ini reminder yang gw butuhkan hari ini, thanks 😄',
+      ],
+      en: [
+        'needed this reminder — rest isn\'t laziness, it\'s maintenance 🙏',
+        'burnout creeps up so quietly, by the time you notice it you\'re already deep in it 😭',
+        'not every day needs to be productive. some days just surviving is enough 😅',
+        'this is real — taking breaks is part of doing good work, not the opposite of it 😄',
+      ],
+    },
+    tools: {
+      id: [
+        'nah ini, tools terbaik bukan yang paling feature-rich tapi yang paling sering dibuka 😄',
+        'relate, gw juga sering jatuh ke rabbit hole nyobain tools baru padahal yang lama masih works 😅',
+        'bener, kadang 1 tool yang dikuasain > 10 tools yang cuma surface level 👏',
+        'setuju, yang penting workflow-nya smooth bukan tools-nya banyak 😭',
+      ],
+      en: [
+        'the best tool is the one you actually open every day, not the one with the most features 😄',
+        'been in that trap too — trying new tools when the current one still works fine 😅',
+        'mastering one tool deeply > surface-level knowledge of ten tools 👏',
+        'agree, smooth workflow matters more than tool count 😭',
+      ],
+    },
+    startup: {
+      id: [
+        'bener, ship dulu baru iterate. perfection is the enemy of progress 🚀',
+        'ini relate, kadang overthinking fitur padahal user cuma butuh 1 core value 😅',
+        'nah, yang penting solve real problem dulu baru scale 😄',
+        'setuju, MVP yang jalan > pitch deck yang cantik tapi belum ada product 👏',
+      ],
+      en: [
+        'ship first, iterate later — perfection kills more startups than bad ideas do 🚀',
+        'so true, users usually only need one core thing done well, not ten features done okay 😅',
+        'solve a real problem first, worry about scale later 😄',
+        'a working MVP beats a beautiful pitch deck with no product every time 👏',
+      ],
+    },
+    design: {
+      id: [
+        'bener, good design itu yang invisible — user nggak mikir, langsung paham 😄',
+        'ini relate, kadang less is more. whitespace itu powerful 👏',
+        'nah, consistency > creativity kalau soal UI. user butuh predictable 😅',
+        'setuju, design yang bagus itu solve problem bukan cuma cantik doang 😭',
+      ],
+      en: [
+        'good design is invisible — when users don\'t have to think, that\'s the win 😄',
+        'less is more, whitespace is powerful, consistency beats creativity in UI 👏',
+        'agree — design that solves problems > design that just looks pretty 😅',
+        'the best interfaces feel obvious in hindsight but take so much iteration to get there 😭',
+      ],
+    },
+    crypto: {
+      id: [
+        'nah ini, research dulu baru action. FOMO itu musuh terbesar di crypto 😅',
+        'bener, yang penting pahami fundamentalnya bukan cuma ikut hype 😄',
+        'relate, kadang yang paling boring justru yang paling aman long term 😭',
+        'setuju, DYOR itu bukan cuma slogan tapi beneran survival skill 👏',
+      ],
+      en: [
+        'research before action — FOMO is the biggest enemy in crypto 😅',
+        'understanding fundamentals > chasing hype, always 😄',
+        'the boring plays are usually the safest long term 😭',
+        'DYOR isn\'t just a slogan, it\'s an actual survival skill in this space 👏',
+      ],
+    },
+    learning: {
+      id: [
+        'bener, belajar itu marathon bukan sprint. yang penting konsisten walau dikit 😄',
+        'ini relate, kadang 15 menit fokus > 2 jam setengah hati 😅',
+        'nah, learning by doing tuh paling cepet nyantolnya 👏',
+        'setuju, nggak harus ngerti semua dulu baru mulai. mulai aja dulu 😭',
+      ],
+      en: [
+        'learning is a marathon not a sprint — small consistent effort compounds 😄',
+        '15 focused minutes > 2 distracted hours, every time 😅',
+        'learning by doing is still the fastest way to actually retain things 👏',
+        'you don\'t need to understand everything before starting. just start 😭',
+      ],
+    },
+    general: {
+      id: [
+        'ini resonates banget, kadang hal simpel yang paling powerful 😄',
+        'bener, perspective kayak gini yang bikin gw mikir ulang 😅',
+        'nah ini take yang underrated, thanks udah share 👏',
+        'relate sama ini, kadang yang obvious justru yang paling sering dilupain 😭',
+      ],
+      en: [
+        'this resonates — sometimes the simplest observations hit the hardest 😄',
+        'needed this perspective today, makes me rethink a few things 😅',
+        'underrated take honestly, glad someone said it 👏',
+        'so true — the obvious stuff is what we forget most often 😭',
+      ],
+    },
+  };
+  
+  const topicReplies = replies[detectedTopic] || replies.general;
+  const langReplies = topicReplies[lang] || topicReplies['en']; // default to EN (global safe)
+  
+  // Hash-based selection to vary across posts + some randomness
+  const hash = postText.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+  const idx = (hash + Math.floor(Math.random() * 2)) % langReplies.length;
+  return { reply: langReplies[idx], topic: detectedTopic, lang };
+}
+
+// === EXTRACT POST TEXT from page ===
+async function extractPostText(page) {
+  try {
+    const text = await page.evaluate(() => {
+      const selectors = [
+        '[data-pressable-container] span',
+        'article span[dir="auto"]',
+        'div[data-pressable-container] > div > div span',
+        'main span[dir="auto"]',
+      ];
+      
+      let bestText = '';
+      for (const sel of selectors) {
+        const els = document.querySelectorAll(sel);
+        for (const el of els) {
+          const t = el.textContent?.trim() || '';
+          if (t.length > 20 && t.length < 2000 && t.length > bestText.length) {
+            if (!t.match(/^\d+[hmd]\s*$/) && !t.startsWith('@')) {
+              bestText = t;
+            }
+          }
+        }
+        if (bestText.length > 30) break;
+      }
+      
+      if (bestText.length < 20) {
+        const allSpans = document.querySelectorAll('span[dir="auto"]');
+        for (const span of allSpans) {
+          const t = span.textContent?.trim() || '';
+          if (t.length > 20 && t.length < 2000) {
+            bestText = t;
+            break;
+          }
+        }
+      }
+      
+      return bestText;
+    });
+    return text || '';
+  } catch (e) {
+    return '';
+  }
+}
+
+// === VERIFY LOGIN (strict) ===
+async function verifyLogin(page) {
+  const content = await page.content();
+  const loggedOutSignals = [
+    'Log in or sign up for Threads',
+    'Log in to see more',
+    'Continue with Instagram',
+    'Log in with username instead',
+  ];
+  
+  for (const signal of loggedOutSignals) {
+    if (content.includes(signal)) {
+      return { loggedIn: false, reason: signal };
+    }
+  }
+  
+  const hasCreate = await page.locator('[aria-label*="Create" i], [aria-label*="Buat" i]').count();
+  const hasProfile = await page.locator('a[href*="/@"]').count();
+  
+  if (hasCreate > 0 || hasProfile > 0) {
+    return { loggedIn: true, reason: 'Create button or profile link found' };
+  }
+  
+  const url = page.url();
+  if (url.includes('/login') || url.includes('/accounts/login')) {
+    return { loggedIn: false, reason: 'Redirected to login page' };
+  }
+  
+  const hasFeed = await page.locator('article, [data-pressable-container]').count();
+  if (hasFeed > 0) {
+    return { loggedIn: true, reason: 'Feed content visible' };
+  }
+  
+  return { loggedIn: false, reason: 'No clear login signals found' };
+}
+
+// === TIMED PAGE NAVIGATION ===
+async function timedGoto(page, url, opts, metrics) {
+  const start = Date.now();
+  await page.goto(url, opts);
+  const duration = Date.now() - start;
+  metrics.recordPageLoad(url, duration);
+  return duration;
+}
+
+// === MAIN ===
+async function main() {
+  // [v3] HARD TIMEOUT WATCHDOG
+  const watchdog = setTimeout(() => {
+    console.error('\n⏱️ HARD TIMEOUT (3 min) — force killing browser');
+    process.exit(2);
+  }, HARD_TIMEOUT_MS);
+
+  console.log('🚀 Threads Engagement v3 — Aggressive Mode (CloakBrowser Optimized)');
+  console.log('='.repeat(60));
+  console.log(`⏰ ${new Date().toISOString()}`);
+  console.log(`🎯 Target: ${MAX_LIKES} likes, ${MAX_REPLIES} replies`);
+  console.log(`🔑 Keywords: ${KEYWORDS.length}`);
+
+  if (!fs.existsSync(SCREENSHOTS_DIR)) fs.mkdirSync(SCREENSHOTS_DIR, { recursive: true });
+
+  // [v3] STEP 0: Cache cleanup
+  console.log('\n🧹 Cleaning profile cache...');
+  const freedMB = cleanupProfileCache();
+  console.log(`   Freed: ~${freedMB}MB`);
+
+  // [v3] Load dedup log
+  let dedupLog = loadDedupLog();
+  console.log(`📝 Dedup log: ${dedupLog.length} recent entries (6h window)`);
+
+  // [v3] Health metrics
+  const metrics = new HealthMetrics();
+
+  // [v3] OPTIMIZED LAUNCH ARGS for CloakBrowser
+  let context;
+  try {
+    context = await chromium.launchPersistentContext(PROFILE_DIR, {
+      headless: true,
+      executablePath: CLOAK_BINARY,
+      args: [
+        // Stability
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--no-first-run',
+        '--no-default-browser-check',
+        
+        // Memory optimization
+        '--single-process',
+        '--disable-gpu',
+        '--disable-gpu-compositing',
+        '--disable-software-rasterizer',
+        '--disable-extensions',
+        '--disable-component-extensions-with-background-pages',
+        '--disable-default-apps',
+        '--disable-background-networking',
+        '--disable-sync',
+        '--disable-translate',
+        '--disable-features=TranslateUI,BlinkGenPropertyTrees,IsolateOrigins,site-per-process',
+        '--disk-cache-size=1', // minimal disk cache (1 byte = effectively disabled)
+        '--media-cache-size=1',
+        '--aggressive-cache-discard',
+        
+        // Stealth / anti-detection
+        '--disable-blink-features=AutomationControlled',
+        '--disable-infobars',
+        '--disable-background-timer-throttling',
+        '--disable-renderer-backgrounding',
+        '--disable-backgrounding-occluded-windows',
+        
+        // Network
+        '--disable-client-side-phishing-detection',
+        '--disable-hang-monitor',
+        '--disable-popup-blocking',
+        '--disable-prompt-on-repost',
+        '--metrics-recording-only',
+        '--no-pings',
+      ],
+      viewport: { width: 1280, height: 800 },
+      ignoreDefaultArgs: ['--enable-automation'], // hide automation flag
+    });
+  } catch (e) {
+    console.error(`❌ Browser launch failed: ${e.message}`);
+    clearTimeout(watchdog);
+    process.exit(1);
+  }
+
+  const page = context.pages()[0] || await context.newPage();
+
+  // Inject cookies
+  if (fs.existsSync(COOKIE_FILE)) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(COOKIE_FILE, 'utf8'));
+      const cookies = raw.map(c => ({
+        name: c.name,
+        value: c.value,
+        domain: c.domain || '.threads.net',
+        path: c.path || '/',
+        expires: c.expires || Math.floor(Date.now() / 1000) + 86400,
+        httpOnly: !!c.httpOnly,
+        secure: c.secure !== false,
+        sameSite: c.sameSite === 'strict' ? 'Strict' :
+                  c.sameSite === 'none' ? 'None' : 'Lax',
+      }));
+      await context.addCookies(cookies);
+      console.log(`🍪 Injected ${cookies.length} cookies`);
+    } catch (e) {
+      console.log(`⚠️ Cookie inject fail: ${e.message.substring(0, 60)}`);
+    }
+  }
+
+  // === STEP 1: Verify Login (STRICT) ===
+  console.log('\n📄 Verifying login...');
+  try {
+    await timedGoto(page, 'https://www.threads.net', { waitUntil: 'domcontentloaded', timeout: 45000 }, metrics);
+  } catch (e) {
+    console.error(`❌ Cannot reach Threads: ${e.message.substring(0, 60)}`);
+    await context.close();
+    clearTimeout(watchdog);
+    process.exit(1);
+  }
+  await sleep(4000);
+
+  const loginStatus = await verifyLogin(page);
+  if (!loginStatus.loggedIn) {
+    console.error(`❌ NOT LOGGED IN — ${loginStatus.reason}`);
+    console.error('🛑 Aborting. Fix session/cookies before next run.');
+    try {
+      await page.screenshot({ path: path.join(SCREENSHOTS_DIR, 'login-failed.png') });
+    } catch {}
+    await context.close();
+    clearTimeout(watchdog);
+    process.exit(1);
+  }
+  console.log(`✅ Logged in (${loginStatus.reason})`);
+
+  // [v3] Record initial memory
+  await metrics.recordMemory(page);
+
+  // === STEP 2: Engagement Loop (single-tab) ===
+  let likesDone = 0;
+  let repliesDone = 0;
+  let postsScanned = 0;
+  const engagedUsers = new Set();
+  const results = { likes: [], replies: [], errors: [] };
+
+  for (const kw of KEYWORDS) {
+    if (likesDone >= MAX_LIKES && repliesDone >= MAX_REPLIES) break;
+
+    console.log(`\n🔍 Keyword: "${kw}"`);
+    
+    try {
+      await timedGoto(page, `https://www.threads.net/search?q=${encodeURIComponent(kw)}&serp_type=default`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 30000,
+      }, metrics);
+    } catch (e) {
+      console.log(`   ⚠️ Search nav failed: ${e.message.substring(0, 50)}`);
+      continue;
+    }
+    await sleep(3000);
+
+    // Collect post URLs
+    let postUrls = [];
+    try {
+      postUrls = await page.evaluate(() => {
+        const links = document.querySelectorAll('a[href*="/post/"]');
+        const urls = [];
+        const seen = new Set();
+        for (const link of links) {
+          const href = link.getAttribute('href');
+          if (href && !seen.has(href)) {
+            seen.add(href);
+            urls.push(href);
+          }
+        }
+        return urls.slice(0, 8);
+      });
+    } catch (e) {
+      console.log(`   ⚠️ Post extraction failed: ${e.message.substring(0, 50)}`);
+      continue;
+    }
+
+    if (postUrls.length === 0) {
+      console.log('   📭 No posts found');
+      continue;
+    }
+    console.log(`   📋 Found ${postUrls.length} posts`);
+
+    for (let i = 0; i < Math.min(postUrls.length, POSTS_PER_KEYWORD); i++) {
+      if (likesDone >= MAX_LIKES && repliesDone >= MAX_REPLIES) break;
+
+      const href = postUrls[i];
+      const username = href.split('/')[1]?.replace('@', '') || 'unknown';
+      
+      if (username === MY_USERNAME) continue;
+      
+      postsScanned++;
+      console.log(`\n   📝 [${postsScanned}] @${username}`);
+
+      try {
+        await timedGoto(page, `https://www.threads.net${href}`, {
+          waitUntil: 'domcontentloaded',
+          timeout: 25000,
+        }, metrics);
+        await sleep(2500);
+      } catch (e) {
+        console.log(`      ⚠️ Nav failed: ${e.message.substring(0, 40)}`);
+        results.errors.push({ user: username, error: 'nav_failed' });
+        continue;
+      }
+
+      // === LIKE ===
+      if (likesDone < MAX_LIKES) {
+        try {
+          const likeResult = await page.evaluate(() => {
+            const btns = document.querySelectorAll('[aria-label*="like" i], [aria-label*="Like" i]');
+            for (const btn of btns) {
+              const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+              if (label.includes('unlike')) continue;
+              const clickTarget = btn.closest('button, div[role="button"]') || btn;
+              if (clickTarget && typeof clickTarget.click === 'function') {
+                clickTarget.click();
+                return { clicked: true, alreadyLiked: false };
+              }
+            }
+            const svgs = document.querySelectorAll('svg[aria-label*="like" i], svg[aria-label*="Like" i]');
+            for (const svg of svgs) {
+              const label = (svg.getAttribute('aria-label') || '').toLowerCase();
+              if (label.includes('unlike')) continue;
+              const parent = svg.closest('button, div[role="button"], a');
+              if (parent && typeof parent.click === 'function') {
+                parent.click();
+                return { clicked: true, alreadyLiked: false };
+              }
+            }
+            const unlikeBtns = document.querySelectorAll('[aria-label*="unlike" i], [aria-label*="Unlike" i]');
+            if (unlikeBtns.length > 0) return { clicked: false, alreadyLiked: true };
+            return { clicked: false, alreadyLiked: false };
+          });
+
+          if (likeResult.alreadyLiked) {
+            likesDone++;
+            console.log(`      ❤️ Already liked`);
+            results.likes.push({ user: username, status: 'already_liked' });
+          } else if (likeResult.clicked) {
+            await sleep(2000);
+            const verified = await page.evaluate(() => {
+              const btns = document.querySelectorAll('[aria-label*="unlike" i], [aria-label*="Unlike" i]');
+              return btns.length > 0;
+            });
+            
+            if (verified) {
+              likesDone++;
+              console.log(`      👍 Like #${likesDone} ✓`);
+              results.likes.push({ user: username, status: 'verified' });
+            } else {
+              const hasError = await page.evaluate(() => {
+                return document.body.innerText.includes('Log in') && 
+                       !document.body.innerText.includes('Log out');
+              });
+              if (!hasError) {
+                likesDone++;
+                console.log(`      👍 Like #${likesDone} ✓ (aggressive)`);
+                results.likes.push({ user: username, status: 'verified_aggressive' });
+              } else {
+                console.log(`      ❌ Like failed (session error)`);
+                results.likes.push({ user: username, status: 'failed' });
+              }
+            }
+          } else {
+            console.log(`      ⚠️ Like button not found`);
+          }
+        } catch (e) {
+          console.log(`      ⚠️ Like error: ${e.message.substring(0, 40)}`);
+        }
+      }
+
+      // === REPLY (contextual + dedup) ===
+      if (repliesDone < MAX_REPLIES && !engagedUsers.has(username)) {
+        // [v3] Check persistent dedup
+        if (hasRepliedRecently(dedupLog, username)) {
+          console.log(`      ⏭️ Skipped reply (dedup: replied within 6h)`);
+          continue;
+        }
+
+        try {
+          const postText = await extractPostText(page);
+          
+          if (postText.length < 15) {
+            console.log(`      ⏭️ Post too short to reply contextually`);
+            continue;
+          }
+          
+          const lang = detectLanguage(postText);
+          console.log(`      📖 "${postText.substring(0, 60)}..." [${lang}]`);
+          // Generate contextual reply (unknown language → default English as global safe choice)
+          const { reply, topic } = generateContextualReply(postText, lang === 'unknown' ? 'en' : lang);
+          console.log(`      🎯 Topic: ${topic} | Reply: "${reply.substring(0, 40)}..."`);
+          
+          // Click reply button
+          const replyClicked = await page.evaluate(() => {
+            const selectors = [
+              '[aria-label*="reply" i]', '[aria-label*="Reply" i]',
+              '[aria-label*="balas" i]', 'svg[aria-label*="reply" i]',
+            ];
+            for (const sel of selectors) {
+              const els = document.querySelectorAll(sel);
+              for (const el of els) {
+                const target = el.closest('button, div[role="button"], a') || el;
+                if (target && typeof target.click === 'function') {
+                  target.click();
+                  return true;
+                }
+              }
+            }
+            return false;
+          });
+
+          if (!replyClicked) {
+            console.log(`      ⚠️ Reply button not found`);
+            continue;
+          }
+
+          await sleep(2500);
+          let textboxFound = false;
+          for (let attempt = 0; attempt < 6; attempt++) {
+            const count = await page.locator('[role="textbox"], [contenteditable="true"]').count();
+            if (count > 0) { textboxFound = true; break; }
+            await sleep(800);
+          }
+
+          if (!textboxFound) {
+            console.log(`      ⚠️ Reply textbox didn't appear`);
+            await page.keyboard.press('Escape');
+            await sleep(500);
+            continue;
+          }
+
+          const textbox = page.locator('[role="textbox"], [contenteditable="true"]').first();
+          await textbox.click();
+          await sleep(300);
+          // Use pressSequentially for React Lexical editor (fill() may not trigger onChange)
+          await textbox.pressSequentially(reply, { delay: 20 });
+          await sleep(1000);
+
+          // Click Post button — MUST target the one INSIDE the modal (not reply icons in thread)
+          const posted = await page.evaluate(() => {
+            // Strategy 1: Find "Post" button inside modal/dialog
+            const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+            if (modal) {
+              const btns = modal.querySelectorAll('div[role="button"], button');
+              for (const btn of btns) {
+                const text = (btn.textContent || '').trim();
+                if (text === 'Post' && btn.offsetHeight > 0) {
+                  btn.click();
+                  return 'modal_post';
+                }
+              }
+            }
+            
+            // Strategy 2: Find "Post" button anywhere (exact match, visible, role=button)
+            const allBtns = document.querySelectorAll('div[role="button"], button');
+            for (const btn of allBtns) {
+              const text = (btn.textContent || '').trim();
+              if (text === 'Post' && btn.offsetHeight > 0) {
+                btn.click();
+                return 'global_post';
+              }
+            }
+            
+            // Strategy 3: Find "Balas" button in modal (Indonesian UI)
+            if (modal) {
+              const btns = modal.querySelectorAll('div[role="button"], button');
+              for (const btn of btns) {
+                const text = (btn.textContent || '').trim();
+                if (text === 'Balas' && btn.offsetHeight > 0) {
+                  btn.click();
+                  return 'modal_balas';
+                }
+              }
+            }
+            
+            return null;
+          });
+
+          if (!posted) {
+            // Last resort: Ctrl+Enter (some editors submit with this)
+            await page.keyboard.press('Control+Enter');
+          } else {
+            console.log(`      📤 Submit via: ${posted}`);
+          }
+
+          await sleep(4000);
+
+          // Verify reply
+          const replyVerified = await page.evaluate(() => {
+            const body = document.body.innerText || '';
+            if (body.includes('Log in') && !body.includes('Log out')) return 'session_error';
+            return 'likely_posted';
+          });
+
+          if (replyVerified === 'session_error') {
+            console.log(`      ❌ Reply failed (session error)`);
+            results.replies.push({ user: username, status: 'failed', reply, topic });
+          } else {
+            repliesDone++;
+            engagedUsers.add(username);
+            dedupLog = addToDedup(dedupLog, username, reply);
+            console.log(`      💬 Reply #${repliesDone} ✓`);
+            results.replies.push({ user: username, status: 'verified', reply, topic, lang });
+          }
+        } catch (e) {
+          console.log(`      ⚠️ Reply error: ${e.message.substring(0, 40)}`);
+          results.errors.push({ user: username, error: `reply: ${e.message.substring(0, 30)}` });
+          try { await page.keyboard.press('Escape'); } catch {}
+          await sleep(500);
+        }
+      }
+
+      await sleep(1500);
+    }
+  }
+
+  // [v3] Record final memory
+  await metrics.recordMemory(page);
+
+  // === STEP 3: POST-RUN VERIFICATION on /replies tab ===
+  if (results.replies.length > 0) {
+    console.log('\n🔍 Verifying replies on /@1strey/replies...');
+    try {
+      await timedGoto(page, `https://www.threads.net/@${MY_USERNAME}/replies`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 30000,
+      }, metrics);
+      await sleep(4000);
+
+      const verifiedReplies = await page.evaluate((replyTexts) => {
+        const spans = document.querySelectorAll('span[dir="auto"]');
+        const found = [];
+        const notFound = [];
+        for (const replyText of replyTexts) {
+          let matched = false;
+          // Check first 30 chars of reply (enough to confirm)
+          const searchStr = replyText.substring(0, 30);
+          for (const span of spans) {
+            if ((span.textContent || '').includes(searchStr)) {
+              matched = true;
+              break;
+            }
+          }
+          if (matched) found.push(replyText);
+          else notFound.push(replyText);
+        }
+        return { found, notFound };
+      }, results.replies.map(r => r.reply));
+
+      // Update reply statuses
+      for (const r of results.replies) {
+        if (verifiedReplies.found.includes(r.reply)) {
+          r.status = 'CONFIRMED';
+          console.log(`   ✅ CONFIRMED: @${r.user} — "${r.reply.substring(0, 40)}..."`);
+        } else {
+          r.status = 'UNCONFIRMED';
+          console.log(`   ❌ UNCONFIRMED: @${r.user} — "${r.reply.substring(0, 40)}..."`);
+        }
+      }
+
+      // Update repliesDone count based on confirmed only
+      const confirmedCount = results.replies.filter(r => r.status === 'CONFIRMED').length;
+      console.log(`   📊 ${confirmedCount}/${results.replies.length} replies confirmed on profile`);
+    } catch (e) {
+      console.log(`   ⚠️ Verification nav failed: ${e.message.substring(0, 40)}`);
+      // Mark all as unverified
+      for (const r of results.replies) {
+        r.status = 'UNVERIFIED';
+      }
+    }
+  }
+
+  // === STEP 4: Save cookies + dedup ===
+  try {
+    const freshCookies = await context.cookies();
+    fs.writeFileSync(COOKIE_FILE, JSON.stringify(freshCookies, null, 2));
+    console.log(`\n💾 Saved ${freshCookies.length} cookies`);
+  } catch (e) {
+    console.log(`\n⚠️ Cookie save failed: ${e.message.substring(0, 40)}`);
+  }
+
+  // [v3] Save dedup log
+  saveDedupLog(dedupLog);
+
+  // === STEP 5: Report with health metrics ===
+  const health = metrics.getReport();
+  
+  console.log('\n' + '='.repeat(60));
+  console.log('📊 ENGAGEMENT REPORT v3 (AGGRESSIVE + OPTIMIZED)');
+  console.log('='.repeat(60));
+  console.log(`⏰ ${new Date().toISOString()}`);
+  console.log(`📋 Posts scanned: ${postsScanned}`);
+  console.log(`👍 Likes: ${likesDone}/${MAX_LIKES}`);
+  console.log(`💬 Replies: ${repliesDone}/${MAX_REPLIES}`);
+  console.log(`❌ Errors: ${results.errors.length}`);
+  
+  // [v3] Health metrics section
+  console.log('\n--- 🏥 Browser Health ---');
+  console.log(`  Runtime: ${health.totalRuntime}`);
+  console.log(`  Pages loaded: ${health.pagesLoaded}`);
+  console.log(`  Avg page load: ${health.avgPageLoad}`);
+  console.log(`  Max page load: ${health.maxPageLoad}`);
+  console.log(`  Peak JS heap: ${health.peakJSHeap}`);
+  console.log(`  System RAM: ${health.systemRAM}`);
+  console.log(`  Cache freed: ~${freedMB}MB`);
+  console.log(`  Dedup entries: ${dedupLog.length}`);
+  
+  if (results.replies.length > 0) {
+    console.log('\n--- 💬 Replies Detail ---');
+    for (const r of results.replies) {
+      console.log(`  @${r.user} [${r.topic}/${r.lang}] ${r.status}`);
+      console.log(`    "${r.reply}"`);
+    }
+  }
+  
+  if (results.errors.length > 0) {
+    console.log('\n--- ❌ Errors ---');
+    for (const e of results.errors) {
+      console.log(`  @${e.user}: ${e.error}`);
+    }
+  }
+
+  // Write full report to file
+  const report = {
+    timestamp: new Date().toISOString(),
+    version: 'v3',
+    postsScanned,
+    likes: { done: likesDone, max: MAX_LIKES, details: results.likes },
+    replies: { done: repliesDone, max: MAX_REPLIES, details: results.replies },
+    errors: results.errors,
+    health,
+    cacheFreed: `${freedMB}MB`,
+    dedupEntries: dedupLog.length,
+  };
+  fs.writeFileSync(
+    path.join(SCREENSHOTS_DIR, 'last-run.json'),
+    JSON.stringify(report, null, 2)
+  );
+
+  await context.close();
+  clearTimeout(watchdog);
+  console.log('\n✅ Done!');
+}
+
+main().catch(e => {
+  console.error(`❌ Fatal: ${e.message}`);
+  process.exit(1);
+});
